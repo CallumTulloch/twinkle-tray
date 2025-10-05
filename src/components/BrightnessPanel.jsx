@@ -10,6 +10,25 @@ const monitorSort = (a, b) => {
   return aSort - bSort
 }
 
+const clampOverlayLevel = (value = 0) => {
+  const numeric = Math.round(Number(value) || 0)
+  if (numeric < 0) return 0
+  if (numeric > 100) return 100
+  return numeric
+}
+
+const sanitizeOverlayLevels = (input = {}) => {
+  const sanitized = {}
+  if (!input || typeof input !== "object") return sanitized
+  Object.keys(input).forEach(key => {
+    const value = input[key]
+    if (typeof value === "number") {
+      sanitized[key] = clampOverlayLevel(value)
+    }
+  })
+  return sanitized
+}
+
 let T = new TranslateReact({}, {})
 
 export default class BrightnessPanel extends PureComponent {
@@ -146,6 +165,68 @@ export default class BrightnessPanel extends PureComponent {
     }
   }
 
+
+  renderOverlayDimmer = () => {
+    if (!(window.setOverlayDimLevel || window.ipc?.send)) {
+      return null
+    }
+
+    const showAllSlider = window.settings?.overlayAllSlider === true
+    const defaultLevel = clampOverlayLevel(this.state.overlayDefaultLevel ?? window.settings?.overlayDimLevel ?? 0)
+    const monitors = Object.values(this.state.monitors || {})
+      .filter(monitor => monitor.type != "none" && window.settings?.hideDisplays?.[monitor.key] !== true)
+      .sort(monitorSort)
+
+    if (!showAllSlider && monitors.length === 0) {
+      return null
+    }
+
+    return (
+      <div className="overlay-dimmer-group">
+        {showAllSlider ? (
+          <div className="monitor-sliders overlay-dimmer" key="overlay-all">
+            <Slider
+              name={T.t("PANEL_LABEL_OVERLAY_DIMMER")}
+              id="overlay-dimmer"
+              level={defaultLevel}
+              min={0}
+              max={100}
+              monitortype="overlay"
+              hwid="overlay-all"
+              onChange={this.handleOverlayDimChange}
+              iconContent={<span>&#xE706;</span>}
+              scrollAmount={window.settings?.scrollFlyoutAmount}
+            />
+          </div>
+        ) : null}
+        {monitors.map(monitor => (
+          <div className="monitor-sliders overlay-dimmer" key={`overlay-${monitor.key}`}>
+            <Slider
+              name={this.getMonitorName(monitor, this.state.names)}
+              id={`overlay-dimmer-${monitor.id}`}
+              level={this.getOverlayLevelForMonitor(monitor)}
+              min={0}
+              max={100}
+              monitortype="overlay"
+              hwid={monitor.key}
+              onChange={this.handleOverlayDimChange}
+              iconContent={<span>&#xE706;</span>}
+              scrollAmount={window.settings?.scrollFlyoutAmount}
+            />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  getOverlayLevelForMonitor = (monitor) => {
+    const overrides = this.state.overlayDimLevels || {}
+    if (monitor?.key && overrides[monitor.key] !== undefined) {
+      return clampOverlayLevel(overrides[monitor.key])
+    }
+    return clampOverlayLevel(this.state.overlayDefaultLevel ?? window.settings?.overlayDimLevel ?? 0)
+  }
+
   // Render link icon, if available
   getLinkIcon = () => {
     if (this.numMonitors > 1) {
@@ -232,9 +313,64 @@ export default class BrightnessPanel extends PureComponent {
     this.forceUpdate()
   }
 
+  handleOverlayDimChange = (level, slider) => {
+    const monitorKey = slider?.props?.hwid
+    const nextLevel = clampOverlayLevel(level)
 
+    if (!monitorKey || monitorKey === "overlay-all") {
+      if (nextLevel === this.state.overlayDefaultLevel) return
+      const overrides = { ...(this.state.overlayDimLevels || {}) }
+      Object.keys(overrides).forEach(key => {
+        if (overrides[key] === nextLevel) {
+          delete overrides[key]
+        }
+      })
+      this.setState({
+        overlayDefaultLevel: nextLevel,
+        overlayDimLevels: overrides
+      })
+      if (window.settings) {
+        window.settings.overlayDimLevel = nextLevel
+        window.settings.overlayDimLevels = { ...overrides }
+      }
+      if (typeof window.setOverlayDimLevel === "function") {
+        window.setOverlayDimLevel(nextLevel, null, overrides)
+      } else if (window.ipc?.send) {
+        window.ipc.send('set-overlay-dim', {
+          level: nextLevel,
+          defaultLevel: nextLevel,
+          levels: overrides
+        })
+      }
+      return
+    }
 
+    const overrides = { ...(this.state.overlayDimLevels || {}) }
+    if (nextLevel === this.state.overlayDefaultLevel) {
+      if (overrides[monitorKey] === undefined) return
+      delete overrides[monitorKey]
+    } else if (overrides[monitorKey] === nextLevel) {
+      return
+    } else {
+      overrides[monitorKey] = nextLevel
+    }
 
+    this.setState({
+      overlayDimLevels: overrides
+    })
+    if (window.settings) {
+      window.settings.overlayDimLevels = { ...overrides }
+    }
+    if (typeof window.setOverlayDimLevel === "function") {
+      window.setOverlayDimLevel(nextLevel, monitorKey, overrides)
+    } else if (window.ipc?.send) {
+      window.ipc.send('set-overlay-dim', {
+        level: nextLevel,
+        monitorKey,
+        levels: overrides
+      })
+    }
+  }
 
 
   // Update monitor info
@@ -299,13 +435,18 @@ export default class BrightnessPanel extends PureComponent {
     const updateInterval = (settings.updateInterval || 500) * 1
     const remaps = (settings.remaps || {})
     const names = (settings.names || {})
+    const overlayDefaultLevel = clampOverlayLevel(settings.overlayDimLevel ?? 0)
+    const overlayDimLevels = sanitizeOverlayLevels(settings.overlayDimLevels)
+
     this.levelsChanged = true
     this.setState({
       linkedLevelsActive,
       remaps,
       names,
       updateInterval,
-      sleepAction
+      sleepAction,
+      overlayDefaultLevel: overlayDefaultLevel,
+      overlayDimLevels: overlayDimLevels
     }, () => {
       this.recalculateNumMonitors()
       this.resetBrightnessInterval()
@@ -381,7 +522,9 @@ export default class BrightnessPanel extends PureComponent {
       update: false,
       sleeping: false,
       updateProgress: 0,
-      isRefreshing: window.isRefreshing
+      isRefreshing: window.isRefreshing,
+      overlayDefaultLevel: clampOverlayLevel(window.settings?.overlayDimLevel ?? 0),
+      overlayDimLevels: sanitizeOverlayLevels(window.settings?.overlayDimLevels)
     }
     this.lastLevels = []
     this.updateInterval = null
@@ -430,6 +573,7 @@ export default class BrightnessPanel extends PureComponent {
   }
 
   render() {
+    const overlayDimmer = this.renderOverlayDimmer()
     const monitorsElem = (this.state.sleeping ? (<div></div>) : this.getMonitors())
     return (
       <div className="window-base" data-theme={window.settings.theme || "default"} id="panel" data-refreshing={this.state.isRefreshing}>
@@ -441,6 +585,7 @@ export default class BrightnessPanel extends PureComponent {
             <div title={T.t("GENERIC_SETTINGS")} className="settings" onClick={window.openSettings}>&#xE713;</div>
           </div>
         </div>
+        { overlayDimmer }
         { monitorsElem }
         {this.getUpdateBar()}
         {this.renderMica()}

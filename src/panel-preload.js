@@ -92,6 +92,21 @@ function updateBrightness(index, level) {
     })
 }
 
+function setOverlayDimLevel(level, monitorKey = null, overrides = null) {
+    const numeric = Math.round(Number(level) || 0)
+    const clamped = Math.max(0, Math.min(100, numeric))
+    const payload = { level: clamped }
+    if (typeof monitorKey === "string" && monitorKey.length > 0) {
+        payload.monitorKey = monitorKey
+    } else {
+        payload.defaultLevel = clamped
+    }
+    if (overrides && typeof overrides === "object") {
+        payload.levels = overrides
+    }
+    ipc.send('set-overlay-dim', payload)
+}
+
 function detectSunValley() {
     if(!window.reactReady) return false;
     try {
@@ -430,6 +445,7 @@ window.addEventListener("setVCP", e => {
 
 window.ipc = ipc
 window.updateBrightness = updateBrightness
+window.setOverlayDimLevel = setOverlayDimLevel
 window.requestMonitors = requestMonitors
 window.openSettings = openSettings
 window.sendSettings = sendSettings

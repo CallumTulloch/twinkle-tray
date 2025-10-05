@@ -1167,6 +1167,7 @@ export default class SettingsWindow extends PureComponent {
                                         <option value="aggressive">{T.t("SETTINGS_GENERAL_FORCE_OVERLAY_TITLE")}</option>
                                     </select>
                                     } expandable={true}>
+                                        <SettingsChild title={T.t("SETTINGS_GENERAL_OVERLAY_ALL_TITLE")} description={T.t("SETTINGS_GENERAL_OVERLAY_ALL_DESC")} input={this.renderToggle("overlayAllSlider", true, "right")} />
                                         <SettingsChild>
                                             <p><i>
                                                 <b>{T.t("SETTINGS_GENERAL_DIS_OVERLAY_TITLE")}:</b> {T.t("SETTINGS_GENERAL_DIS_OVERLAY_DESC")}<br />
@@ -1312,12 +1313,12 @@ export default class SettingsWindow extends PureComponent {
                                             this.setState({ ddcPowerOffValue: parseInt(e.target.value) })
                                             window.sendSettings({ ddcPowerOffValue: parseInt(e.target.value) })
                                         }}>
-                                            <option value={4}>{T.t("SETTINGS_FEATURES_POWER_STANDBY")} (4) ⚠️</option>
+                                            <option value={4}>{T.t("SETTINGS_FEATURES_POWER_STANDBY")} (4) ??</option>
                                             <option value={5}>{T.t("SETTINGS_FEATURES_POWER_OFF")} (5)</option>
                                             <option value={6}>{T.t("SETTINGS_FEATURES_POWER_COMPAT")} (4 &amp; 5)</option>
                                         </select>
                                     }>
-                                        <SettingsChild description={<>⚠️ <em>{T.t("SETTINGS_FEATURES_POWER_WARNING")}</em></>} />
+                                        <SettingsChild description={<>?? <em>{T.t("SETTINGS_FEATURES_POWER_WARNING")}</em></>} />
                                     </SettingsOption>                                
                                 </div>
                             </SettingsPage>
@@ -1379,7 +1380,7 @@ export default class SettingsWindow extends PureComponent {
                                         <SettingsChild description={
                                             <div>
                                                 <i>{T.t("SETTINGS_HOTKEYS_TOD_NOTE")}</i>
-                                                { (this.state.rawSettings?.sleepAction === "ddcci" || this.state.rawSettings?.sleepAction === "ps_ddcci" ? (<div className="ddc-warning"><br />⚠️ <em>{T.t("GENERIC_DDC_WARNING")}</em></div>) : null) }
+                                                { (this.state.rawSettings?.sleepAction === "ddcci" || this.state.rawSettings?.sleepAction === "ps_ddcci" ? (<div className="ddc-warning"><br />⚠�E�E<em>{T.t("GENERIC_DDC_WARNING")}</em></div>) : null) }
                                             </div>
                                         } />
                                     </SettingsOption>

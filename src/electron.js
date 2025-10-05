@@ -1,4 +1,4 @@
-const { app } = require('electron')
+﻿const { app } = require('electron')
 const fs = require('fs')
 
 const path = require('path');
@@ -45,7 +45,6 @@ if(app.commandLine.hasSwitch("show-console")) {
   reopenAppWithConsole()
 }
 
-const { Readable } = require("node:stream")
 //require("os").setPriority(0, require("os").constants.priority.PRIORITY_BELOW_NORMAL)
 const { BrowserWindow, nativeTheme, systemPreferences, Menu, ipcMain, screen, globalShortcut, powerMonitor } = require('electron')
 const uuid = require('crypto').randomUUID
@@ -531,6 +530,12 @@ const defaultSettings = {
   recreateTray: false,
   recreateFlyout: false,
   defaultOverlayType: "safe",
+  overlayDimLevel: 0,
+  overlayDimLevels: {},
+  overlayAllSlider: false,
+  overlayDimLevel: 0,
+  overlayDimLevels: {},
+  overlayAllSlider: false,
   disableMouseEvents: false,
   disableThrottling: false,
   userDDCBrightnessVCPs: {},
@@ -558,7 +563,405 @@ const tempSettings = {
   pauseIdleDetection: false
 }
 
-let settings = Object.assign({}, defaultSettings)
+// ==============================
+//   基本設定
+// ==============================
+let settings = Object.assign({}, defaultSettings);
+
+const dimmerOverlayWindows = new Map();
+let defaultDimmerOverlayLevel = 0;
+
+// ==============================
+//   Dimmer 関連ユーティリティ
+// ==============================
+
+function getDimmerOpacity(level = 0) {
+  const numeric = Math.round(Number(level) || 0);
+  if (numeric < 0) return 0;
+  if (numeric > 100) return 1;
+  return numeric / 100;
+}
+
+function applyDimmerOverlayLevel(win, level) {
+  const opacity = getDimmerOpacity(level);
+  if (!win || win.isDestroyed()) return opacity;
+
+  try {
+    win.setOpacity(opacity);
+  } catch (e) {
+    // Some platforms might not support setOpacity; ignore.
+  }
+
+  if (win.webContents && !win.webContents.isDestroyed()) {
+    const updateCss = () => {
+      const cssOpacity = Number.isFinite(opacity) ? opacity : 0;
+      const script = `
+        (() => {
+          const body = document.body;
+          if (!body) return;
+          body.style.width = '100vw';
+          body.style.height = '100vh';
+          body.style.margin = '0';
+          body.style.backgroundColor = 'rgba(0, 0, 0, ${cssOpacity})';
+        })();`;
+      win.webContents.executeJavaScript(script, true).catch(() => {});
+    };
+    if (win.webContents.isLoading()) {
+      win.webContents.once('did-finish-load', updateCss);
+    } else {
+      updateCss();
+    }
+  }
+
+  return opacity;
+}
+
+function clampDimmerLevel(value = 0) {
+  const numeric = Math.round(Number(value) || 0);
+  return Math.max(0, Math.min(100, numeric));
+}
+
+function sanitizeOverlayLevels(input = {}) {
+  if (!input || typeof input !== 'object') return {};
+  const sanitized = {};
+  for (const key of Object.keys(input)) {
+    sanitized[key] = clampDimmerLevel(input[key]);
+  }
+  return sanitized;
+}
+
+function getMonitorBoundsRect(monitor) {
+  const bounds = monitor?.bounds;
+  if (!bounds) return null;
+  const width = bounds.width ?? bounds.Width;
+  const height = bounds.height ?? bounds.Height;
+  const position = bounds.position ?? bounds.Position ?? {};
+  const x = bounds.x ?? bounds.X ?? position.x ?? position.X;
+  const y = bounds.y ?? bounds.Y ?? position.y ?? position.Y;
+  if (width === undefined || height === undefined || x === undefined || y === undefined) return null;
+  return {
+    x: Math.round(Number(x) || 0),
+    y: Math.round(Number(y) || 0),
+    width: Math.round(Number(width) || 0),
+    height: Math.round(Number(height) || 0)
+  };
+}
+
+function getDisplayBoundsRect(display) {
+  if (!display?.bounds) return null;
+  let rect = display.bounds;
+  if (typeof screen?.dipToScreenRect === 'function') {
+    const converted = screen.dipToScreenRect(null, rect);
+    if (converted) rect = converted;
+  }
+  return {
+    x: Math.round(Number(rect.x) || 0),
+    y: Math.round(Number(rect.y) || 0),
+    width: Math.round(Number(rect.width) || 0),
+    height: Math.round(Number(rect.height) || 0)
+  };
+}
+
+function findMonitorForDisplay(display) {
+  const displayRect = getDisplayBoundsRect(display);
+  if (!displayRect) return null;
+  let fallback = null;
+  for (const monitor of Object.values(monitors || {})) {
+    if (!monitor) continue;
+    if (settings.hideDisplays?.[monitor.key] === true) continue;
+    if (monitor?.sourceID !== undefined && display?.id !== undefined && monitor.sourceID == display.id) {
+      return monitor;
+    }
+    const monitorRect = getMonitorBoundsRect(monitor);
+    if (!monitorRect) continue;
+    const exactMatch =
+      Math.abs(monitorRect.x - displayRect.x) <= 1 &&
+      Math.abs(monitorRect.y - displayRect.y) <= 1 &&
+      Math.abs(monitorRect.width - displayRect.width) <= 1 &&
+      Math.abs(monitorRect.height - displayRect.height) <= 1;
+    if (exactMatch) {
+      return monitor;
+    }
+    const sizeMatches =
+      Math.abs(monitorRect.width - displayRect.width) <= 1 &&
+      Math.abs(monitorRect.height - displayRect.height) <= 1;
+    if (!fallback && sizeMatches) {
+      fallback = monitor;
+    }
+  }
+  return fallback;
+}
+
+function getOverlayLevelForDisplay(display) {
+  const overrides = settings.overlayDimLevels || {};
+  const monitor = findMonitorForDisplay(display);
+  if (monitor?.key && overrides[monitor.key] !== undefined) {
+    return clampDimmerLevel(overrides[monitor.key]);
+  }
+  return defaultDimmerOverlayLevel;
+}
+
+// ==============================
+//   Electron 起動オプション
+// ==============================
+
+if (app.commandLine.hasSwitch("show-console")) {
+  reopenAppWithConsole();
+}
+
+const { Readable } = require("node:stream");
+
+// Expose GC
+app.commandLine.appendSwitch('js-flags', '--expose_gc --max-old-space-size=128');
+app.commandLine.appendSwitch('disable-http-cache');
+require("v8").setFlagsFromString('--expose_gc');
+global.gc = require("vm").runInNewContext('gc');
+
+ActiveWindow.initialize();
+
+// ==============================
+//   Logging
+// ==============================
+if (fs.existsSync(logPath)) {
+  try {
+    fs.unlinkSync(logPath);
+  } catch (e) {
+    console.log("Couldn't delete log file");
+  }
+}
+
+if (!isDev && !app.commandLine.hasSwitch("console")) console.log = () => {};
+
+// ==============================
+//   DDC/CI Monitor Thread
+// ==============================
+
+function vcpStr(code) {
+  return `0x${parseInt(code).toString(16).toUpperCase()}`;
+}
+
+function startMonitorThread() {
+  if (monitorsThreadReal?.connected || monitorsThreadStarting || isWindowsUserIdle) return false;
+  monitorsThreadReady = false;
+  monitorsThreadStarting = true;
+  console.log("Starting monitor thread");
+  const skipTest = (settings.preferredDDCCIMethod == "auto" ? false : true);
+  monitorsThreadReal = fork(path.join(__dirname, 'Monitors.js'),
+    ["--isdev=" + isDev, "--apppath=" + app.getAppPath(), "--skiptest=" + skipTest],
+    { silent: false }
+  );
+
+  monitorsThreadReal.on("message", (data) => {
+    if (data?.type) {
+      if (data.type === "ready") {
+        monitorsThreadReady = true;
+        monitorsThreadStarting = false;
+        isRefreshing = false;
+        monitorsThreadReal.send({ type: "settings", settings });
+        monitorsThreadReal.send({ type: "ddcBrightnessVCPs", ddcBrightnessVCPs: getDDCBrightnessVCPs() });
+        monitorsThread.send({ type: "wmi-bridge-ok", value: wmiBridgeOK });
+        getLocalization();
+      }
+      if (data.type === "ddcciModeTestResult") {
+        ddcciModeTestResult = data.value;
+        settings.lastDetectedDDCCIMethod = (data.value ? "fast" : "accurate");
+      }
+      monitorsEventEmitter.emit(data.type, data);
+    }
+  });
+
+  monitorsThreadReal.on("error", err => {
+    console.error(err);
+    if (monitorsThreadFailed) return false;
+    monitorsThreadFailed = true;
+
+    const options = {
+      title: 'Monitors thread failed',
+      message: 'The monitors thread failed with the following message:',
+      detail: err
+    };
+    require('electron').dialog.showMessageBox(null, options, () => {});
+
+    stopMonitorThread();
+    setTimeout(() => {
+      if (!monitorsThreadReal?.connected && !monitorsThreadStarting) {
+        startMonitorThread();
+      }
+    }, 1000);
+  });
+}
+
+function stopMonitorThread() {
+  console.log("Killing monitor thread");
+  monitorsThreadReady = false;
+  monitorsThreadStarting = false;
+  setIsRefreshing(false);
+  if (monitorsThreadReal?.connected) {
+    monitorsThreadReal.kill();
+  }
+}
+
+function getVCP(monitor, code) {
+  return new Promise((resolve) => {
+    if (!monitor || !code) resolve(-1);
+    const vcpParsed = parseInt(`0x${parseInt(code).toString(16).toUpperCase()}`);
+    const hwid = (typeof monitor === "object" ? monitor.hwid.join("#") : monitor);
+    const timeout = setTimeout(() => resolve(-1), 3000);
+
+    monitorsThread.once(`getVCP::${hwid}::${vcpParsed}`, data => {
+      clearTimeout(timeout);
+      if (data?.value?.[0] != undefined) {
+        try {
+          monitors[hwid?.split("#")[2]].features[vcpStr(vcpParsed)] = data.value?.[0];
+        } catch (e) { console.log(e); }
+      }
+      resolve(data?.value?.[0]);
+    });
+
+    monitorsThread.send({ type: "getVCP", code: vcpParsed, monitor: hwid });
+  });
+}
+
+// ==============================
+//   Dimmer Overlay Windows
+// ==============================
+
+function destroyDimmerOverlays() {
+  for (const [id, win] of dimmerOverlayWindows.entries()) {
+    try {
+      if (win && !win.isDestroyed()) win.close();
+    } catch (e) { console.log("Failed to close dimmer overlay window", e); }
+  }
+  dimmerOverlayWindows.clear();
+}
+
+function updateDimmerOverlayWindowBounds(win, display) {
+  if (!win || win.isDestroyed()) return;
+  const bounds = {
+    x: Math.round(display.bounds.x),
+    y: Math.round(display.bounds.y),
+    width: Math.round(display.bounds.width),
+    height: Math.round(display.bounds.height)
+  };
+  try {
+    win.setBounds(bounds, false);
+    win.setAlwaysOnTop(true, 'screen-saver');
+    win.setIgnoreMouseEvents(true, { forward: true });
+  } catch (e) { console.log("Failed to update dimmer overlay bounds", e); }
+}
+
+function createDimmerOverlayWindow(display, level = defaultDimmerOverlayLevel) {
+  const initialLevel = level ?? defaultDimmerOverlayLevel;
+  const initialOpacity = getDimmerOpacity(initialLevel);
+  const win = new BrowserWindow({
+    x: display.bounds.x,
+    y: display.bounds.y,
+    width: display.bounds.width,
+    height: display.bounds.height,
+    frame: false,
+    show: false,
+    transparent: true,
+    resizable: false,
+    focusable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    fullscreenable: false,
+    backgroundColor: '#00000000',
+    type: 'toolbar',
+    hasShadow: false,
+    enableLargerThanScreen: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true
+    }
+  });
+  try {
+    win.setMenu(null);
+    win.removeMenu?.();
+  } catch (e) {}
+
+  const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100vw;height:100vh;background:rgba(0,0,0,' + initialOpacity + ');}</style></head><body></body></html>';
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+  win.setIgnoreMouseEvents(true, { forward: true });
+  win.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
+  win.setAlwaysOnTop(true, 'screen-saver');
+  updateDimmerOverlayWindowBounds(win, display);
+
+  const ensureLevel = () => {
+    try { applyDimmerOverlayLevel(win, level ?? defaultDimmerOverlayLevel); }
+    catch (e) { console.log("Failed to update dimmer overlay window", e); }
+  };
+
+  if (win.webContents && !win.webContents.isDestroyed()) {
+    if (win.webContents.isLoading()) {
+      win.webContents.once('did-finish-load', ensureLevel);
+    } else { ensureLevel(); }
+  }
+
+  win.once('ready-to-show', () => {
+    try {
+      const appliedOpacity = applyDimmerOverlayLevel(win, level ?? defaultDimmerOverlayLevel);
+      if (appliedOpacity > 0) win.showInactive();
+    } catch (e) { console.log("Failed to show dimmer overlay", e); }
+  });
+
+  win.on('closed', () => {
+    for (const [id, existingWin] of dimmerOverlayWindows.entries()) {
+      if (existingWin === win) dimmerOverlayWindows.delete(id);
+    }
+  });
+  return win;
+}
+
+function updateDimmerOverlayWindows(levelUpdate) {
+  if (typeof levelUpdate === 'number') {
+    defaultDimmerOverlayLevel = clampDimmerLevel(levelUpdate);
+  }
+  if (!app.isReady()) return;
+
+  settings.overlayDimLevels = sanitizeOverlayLevels(settings.overlayDimLevels);
+  const displays = screen.getAllDisplays();
+  const seen = new Set();
+  let hasVisibleOverlay = false;
+
+  for (const display of displays) {
+    seen.add(display.id);
+    const displayLevel = getOverlayLevelForDisplay(display);
+    const effectiveLevel = clampDimmerLevel(displayLevel);
+    let win = dimmerOverlayWindows.get(display.id);
+
+    if (effectiveLevel > 0) {
+      hasVisibleOverlay = true;
+      if (!win || win.isDestroyed()) {
+        win = createDimmerOverlayWindow(display, effectiveLevel);
+        dimmerOverlayWindows.set(display.id, win);
+      } else {
+        updateDimmerOverlayWindowBounds(win, display);
+        try {
+          const appliedOpacity = applyDimmerOverlayLevel(win, effectiveLevel);
+          if (appliedOpacity > 0 && !win.isVisible()) win.showInactive();
+        } catch (e) { console.log("Failed to update dimmer overlay window", e); }
+      }
+    } else if (win) {
+      try { if (!win.isDestroyed()) win.close(); }
+      catch (e) { console.log("Failed to update dimmer overlay window", e); }
+      dimmerOverlayWindows.delete(display.id);
+    }
+  }
+
+  for (const [id, win] of dimmerOverlayWindows.entries()) {
+    if (!seen.has(id)) {
+      try { if (win && !win.isDestroyed()) win.close(); }
+      catch (e) { console.log("Failed to remove stale dimmer overlay window", e); }
+      dimmerOverlayWindows.delete(id);
+    }
+  }
+
+  if (!hasVisibleOverlay) destroyDimmerOverlays();
+}
+
+
 
 function readSettings(doProcessSettings = true) {
   try {
@@ -575,6 +978,10 @@ function readSettings(doProcessSettings = true) {
   // Overrides
   settings.isDev = isDev
   settings.killWhenIdle = false
+  if (typeof settings.overlayDimLevel !== 'number') settings.overlayDimLevel = 0
+  settings.overlayDimLevel = clampDimmerLevel(settings.overlayDimLevel)
+  settings.overlayDimLevels = sanitizeOverlayLevels(settings.overlayDimLevels)
+  defaultDimmerOverlayLevel = settings.overlayDimLevel
 
   if(!isDev && settings.showConsole && !app.commandLine.hasSwitch("console")) {
     reopenAppWithConsole()
@@ -771,6 +1178,13 @@ function processSettings(newSettings = {}, sendUpdate = true) {
 
     settings.settingsVer = "v" + appVersion
     settings.settingsBuild = appBuild
+
+    if (newSettings.overlayDimLevel !== undefined) {
+      defaultDimmerOverlayLevel = clampDimmerLevel(settings.overlayDimLevel)
+    }
+    if (newSettings.overlayDimLevel !== undefined || newSettings.overlayDimLevels !== undefined || newSettings.isReadSettings) {
+      updateDimmerOverlayWindows()
+    }
 
     if (settings.theme) {
       nativeTheme.themeSource = determineTheme(settings.theme)
@@ -2433,6 +2847,72 @@ ipcMain.on('set-sdr-brightness', (e, values) => {
   setRecentlyInteracted(true)
   updateBrightnessThrottle(values.monitor, values.value, false, true, "sdr")
 })
+ipcMain.on('set-overlay-dim', (e, payload) => {
+  let overlayLevels = { ...(settings.overlayDimLevels || {}) }
+  let defaultLevel = defaultDimmerOverlayLevel
+
+  const applyDefaultLevel = level => {
+    if (level === undefined) return
+    const clamped = clampDimmerLevel(level)
+    if (clamped !== defaultLevel) {
+      defaultLevel = clamped
+    }
+  }
+
+  const applyMonitorLevel = (key, level) => {
+    if (typeof key !== 'string' || !key.length) return
+    const clamped = clampDimmerLevel(level)
+    if (clamped === defaultLevel) {
+      if (overlayLevels[key] !== undefined) {
+        delete overlayLevels[key]
+      }
+    } else if (overlayLevels[key] !== clamped) {
+      overlayLevels[key] = clamped
+    }
+  }
+
+  if (typeof payload === 'number') {
+    applyDefaultLevel(payload)
+  } else if (payload && typeof payload === 'object') {
+    if (payload.levels && typeof payload.levels === 'object') {
+      overlayLevels = sanitizeOverlayLevels(payload.levels)
+    }
+    if (typeof payload.defaultLevel === 'number') {
+      applyDefaultLevel(payload.defaultLevel)
+    }
+    if (typeof payload.monitorKey === 'string') {
+      applyMonitorLevel(payload.monitorKey, payload.level)
+    } else if (typeof payload.level === 'number' && payload.monitorKey === undefined) {
+      applyDefaultLevel(payload.level)
+    }
+  } else {
+    return
+  }
+
+  overlayLevels = sanitizeOverlayLevels(overlayLevels)
+
+  for (const key of Object.keys(overlayLevels)) {
+    if (overlayLevels[key] === defaultLevel) {
+      delete overlayLevels[key]
+    }
+  }
+
+  const previousLevels = sanitizeOverlayLevels(settings.overlayDimLevels)
+  const levelsChanged = JSON.stringify(previousLevels) !== JSON.stringify(overlayLevels)
+  const defaultChanged = defaultLevel !== defaultDimmerOverlayLevel
+
+  if (!levelsChanged && !defaultChanged) {
+    updateDimmerOverlayWindows()
+    return
+  }
+
+  defaultDimmerOverlayLevel = defaultLevel
+  settings.overlayDimLevel = defaultLevel
+  settings.overlayDimLevels = overlayLevels
+
+  writeSettings({ overlayDimLevel: defaultLevel, overlayDimLevels: overlayLevels })
+  updateDimmerOverlayWindows()
+})
 
 ipcMain.on('get-window-history', () => sendToAllWindows('window-history', windowHistory))
 
@@ -3179,6 +3659,7 @@ app.on("ready", async () => {
   getLocalization()
   showIntro()
   createPanel(false, true)
+  updateDimmerOverlayWindows()
 
   await doWMIBridgeTest()
   startMonitorThread()
@@ -3222,6 +3703,7 @@ app.on('quit', () => {
   } catch (e) {
 
   }
+  destroyDimmerOverlays()
 })
 
 
@@ -3828,10 +4310,22 @@ function addEventListeners() {
   systemPreferences.on('color-changed', handleAccentChange)
   nativeTheme.on('updated', handleAccentChange)
 
-  addDisplayChangeListener(() => { if(settings.useWin32Event) handleMonitorChange("win32") })
-  screen.addListener("display-added", () => { if(settings.useElectronEvents) handleMonitorChange("display-added") })
-  screen.addListener("display-removed", () => { if(settings.useElectronEvents) handleMonitorChange("display-removed") })
-  screen.addListener("display-metrics-changed", () => { if(settings.useElectronEvents) handleMetricsChange("display-metrics-changed") })
+  addDisplayChangeListener(() => {
+    if(settings.useWin32Event) handleMonitorChange("win32")
+    updateDimmerOverlayWindows()
+  })
+  screen.addListener("display-added", () => {
+    if(settings.useElectronEvents) handleMonitorChange("display-added")
+    updateDimmerOverlayWindows()
+  })
+  screen.addListener("display-removed", () => {
+    if(settings.useElectronEvents) handleMonitorChange("display-removed")
+    updateDimmerOverlayWindows()
+  })
+  screen.addListener("display-metrics-changed", () => {
+    if(settings.useElectronEvents) handleMetricsChange("display-metrics-changed")
+    updateDimmerOverlayWindows()
+  })
 
   enableMouseEvents()
 
@@ -4905,3 +5399,4 @@ const pipe = {
 }
 
 pipe.start()
+

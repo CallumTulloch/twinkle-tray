@@ -6,9 +6,14 @@
 #include "windows.h"
 #include "winuser.h"
 
+#include <chrono>
 #include <iostream>
+#include <list>
 #include <map>
 #include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
 #include <vector>
 
 struct Monitor {
@@ -1108,3 +1113,4 @@ Init(Napi::Env env, Napi::Object exports)
 }
 
 NODE_API_MODULE(NODE_GYP_MODULE_NAME, Init)
+

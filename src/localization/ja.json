@@ -222,5 +222,7 @@
     "SETTINGS_MONITORS_HDR_DISPLAYS_DESC": "特定のモニターでSDRの明るさスライダーを有効にします。動作には、WindowsでHDRを有効にする必要があります。",
     "SETTINGS_MONITORS_SDR_SLIDER_DESCRIPTION": "HDRが有効なら、メインの明るさスライダーからSDRの明るさを調整します。",
     "SETTINGS_MONITORS_SDR_SLIDER_TITLE": "メインのスライダーからSDRを調整",
-    "SETTINGS_FEATURES_SDR_BRIGHTNESS": "SDRの明るさ"
-}
+    "SETTINGS_FEATURES_SDR_BRIGHTNESS": "SDRの明るさ",
+    "PANEL_LABEL_OVERLAY_DIMMER": "オーバーレイの減光",
+    "SETTINGS_GENERAL_OVERLAY_ALL_TITLE": "一括オーバーレイスライダーを表示",
+    "SETTINGS_GENERAL_OVERLAY_ALL_DESC": "すべてのディスプレイを一度に減光できるスライダーを追加します。"}
